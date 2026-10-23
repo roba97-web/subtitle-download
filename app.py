@@ -1,10 +1,12 @@
 """AI 자막 수집기 — 설치파일 다운로드 사이트 (Streamlit)
 
-GitHub 최신 릴리스(releases/latest)에서 설치파일(.exe) 주소를 가져와 보여준다.
+GitHub 릴리스 목록(releases)에서 최신 설치파일(.exe)과 버전별 다운로드 목록을 가져와 보여준다.
 새 릴리스를 올리면 코드를 고치지 않아도 자동으로 최신 파일로 바뀐다.
 """
 
 from datetime import datetime, timedelta, timezone
+
+from html import escape
 
 import requests
 import streamlit as st
@@ -14,37 +16,79 @@ import streamlit as st
 GITHUB_REPO = "roba97-web/subtitle-download"
 # ─────────────────────────────────────────────────────
 
-API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=20"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 KST = timezone(timedelta(hours=9))
+
+# 파일 끝(확장자)에 따라 목록에 보여줄 설명
+FILE_KINDS = {
+    ".exe": "설치파일",
+    ".pptx": "사용 설명서 (파워포인트)",
+    ".pdf": "사용 설명서 (PDF)",
+    ".txt": "사용법 (메모장)",
+    ".zip": "압축 파일",
+}
 
 st.set_page_config(page_title="AI 자막 수집기 다운로드", page_icon="💬", layout="centered")
 
 
+def _size_text(size_bytes):
+    if size_bytes < 100 * 1024:
+        return f"약 {max(1, round(size_bytes / 1024))}KB"
+    return f"약 {size_bytes / 1024 / 1024:.1f}MB"
+
+
+def _file_kind(name):
+    lower = name.lower()
+    return next((kind for ext, kind in FILE_KINDS.items() if lower.endswith(ext)), "파일")
+
+
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_latest_release():
-    """최신 릴리스의 버전·날짜·설치파일 주소. 실패하면 예외(실패는 캐시되지 않음)."""
+def fetch_releases():
+    """버전별 다운로드 목록(최신이 맨 앞). 실패하면 예외(실패는 캐시되지 않음)."""
     resp = requests.get(
         API_URL,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "subtitle-download-site"},
         timeout=10,
     )
     resp.raise_for_status()
-    data = resp.json()
-    exe = next(
-        (a for a in data.get("assets", [])
-         if a["name"].lower().endswith(".exe") and "ocr" not in a["name"].lower()),
-        None,
+    releases = []
+    for data in resp.json():
+        if data.get("draft") or data.get("prerelease"):
+            continue
+        files = [
+            {
+                "name": a["name"],
+                "kind": _file_kind(a["name"]),
+                "url": a["browser_download_url"],
+                "size": _size_text(a.get("size", 0)),
+            }
+            for a in data.get("assets", [])
+            if "ocr" not in a["name"].lower()
+        ]
+        if not files:
+            continue
+        files.sort(key=lambda f: not f["name"].lower().endswith(".exe"))  # 설치파일을 맨 위로
+        published = datetime.fromisoformat(data["published_at"].replace("Z", "+00:00")).astimezone(KST)
+        releases.append({
+            "version": data.get("tag_name", ""),
+            "date": f"{published.year}년 {published.month}월 {published.day}일",
+            "files": files,
+        })
+    if not releases or not releases[0]["files"][0]["name"].lower().endswith(".exe"):
+        raise LookupError("최신 릴리스에 설치파일(.exe)이 없습니다")
+    return releases
+
+
+def file_list_html(files):
+    rows = "".join(
+        f'''<li class="file">
+  <div class="meta"><b>{escape(f["kind"])}</b><span>{escape(f["name"])} · {f["size"]}</span></div>
+  <a class="get" href="{escape(f["url"])}" download>받기</a>
+</li>'''
+        for f in files
     )
-    if exe is None:
-        raise LookupError("릴리스에 설치파일(.exe)이 없습니다")
-    published = datetime.fromisoformat(data["published_at"].replace("Z", "+00:00")).astimezone(KST)
-    return {
-        "version": data.get("tag_name", ""),
-        "date": f"{published.year}년 {published.month}월 {published.day}일",
-        "url": exe["browser_download_url"],
-        "size_mb": exe.get("size", 0) / 1024 / 1024,
-    }
+    return f'<ul class="files">{rows}</ul>'
 
 
 st.markdown(
@@ -71,6 +115,14 @@ div[data-testid="stLinkButton"] a p { font-size: 1.25rem !important; color: #fff
 .note { border: 1px solid rgba(74, 111, 165, 0.45); background: rgba(74, 111, 165, 0.08);
         border-radius: 10px; padding: 0.8rem 1rem; line-height: 1.7; word-break: keep-all; }
 .note p { margin: 0.15rem 0; }
+.files { list-style: none; padding: 0 !important; margin: 0.3rem 0 0.8rem 0 !important; }
+.files li.file { margin: 0 0 0.6rem 0 !important; padding: 0.7rem 0.9rem !important; display: flex; align-items: center;
+                 gap: 0.8rem; border: 1px solid rgba(74, 111, 165, 0.45); border-radius: 10px; }
+.files .meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; line-height: 1.5; }
+.files .meta span { font-size: 0.85rem; opacity: 0.7; overflow-wrap: anywhere; }
+.files a.get { flex: 0 0 auto; padding: 0.45rem 1.1rem; border-radius: 8px; background: var(--navy);
+               border: 1px solid var(--navy-line); color: #fff !important; text-decoration: none !important; font-weight: 700; }
+.files a.get:hover { background: #2a4d87; }
 .law { font-size: 0.85rem; opacity: 0.7; margin-top: 1.5rem; word-break: keep-all; }
 </style>
 <div class="hero">
@@ -83,27 +135,44 @@ div[data-testid="stLinkButton"] a p { font-size: 1.25rem !important; color: #fff
 )
 
 try:
-    release = fetch_latest_release()
+    releases = fetch_releases()
 except Exception:
-    release = None
+    releases = None
 
-if release:
+if releases:
+    latest = releases[0]
+    exe = latest["files"][0]
     st.markdown(
-        f'<span class="ver">최신 버전 <b>{release["version"]}</b> · {release["date"]} 올라옴</span>',
+        f'<span class="ver">최신 버전 <b>{latest["version"]}</b> · {latest["date"]} 올라옴</span>',
         unsafe_allow_html=True,
     )
-    st.link_button("⬇  다운로드", release["url"], type="primary", width="stretch")
+    st.link_button("⬇  다운로드", exe["url"], type="primary", width="stretch")
     st.markdown(
-        f'<p class="small">윈도우용 설치파일 · 약 {release["size_mb"]:.1f}MB</p>',
+        f'<p class="small">윈도우용 설치파일 · {exe["size"]}</p>',
         unsafe_allow_html=True,
     )
 else:
     st.warning("지금은 최신 버전 정보를 불러오지 못했습니다. 아래 버튼을 눌러 릴리스 페이지에서 설치파일(.exe)을 받아 주세요.")
     st.link_button("릴리스 페이지 열기", RELEASES_PAGE, type="primary", width="stretch")
 
+if releases:
+    st.markdown("### 다운로드 목록")
+    st.markdown(
+        f'<p class="small">최신 버전 <b>{escape(latest["version"])}</b>에 올라온 파일입니다.</p>'
+        + file_list_html(latest["files"]),
+        unsafe_allow_html=True,
+    )
+    if len(releases) > 1:
+        with st.expander("이전 버전 보기"):
+            for r in releases[1:]:
+                st.markdown(
+                    f'<p class="small"><b>{escape(r["version"])}</b> · {r["date"]}</p>' + file_list_html(r["files"]),
+                    unsafe_allow_html=True,
+                )
+
 step1 = (
     "위의 <b>[다운로드]</b> 버튼을 눌러 설치파일을 받습니다."
-    if release
+    if releases
     else "위의 버튼으로 릴리스 페이지를 열고, 끝이 <b>.exe</b>인 파일을 눌러 받습니다."
 )
 st.markdown(
