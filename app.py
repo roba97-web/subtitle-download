@@ -8,6 +8,7 @@ GitHub 릴리스 목록(releases)에서 최신 프로그램(v3.0부터 휴대용
 from datetime import datetime, timedelta, timezone
 
 from html import escape
+import hmac
 
 import requests
 import streamlit as st
@@ -86,6 +87,60 @@ def fetch_releases():
     if not releases or not _is_program(releases[0]["files"][0]["file"]):
         raise LookupError("최신 릴리스에 프로그램 파일(.zip 또는 .exe)이 없습니다")
     return releases
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_download_counts():
+    """관리자용: 모든 버전·모든 파일(OCR 판 포함)의 받은 횟수. 실패하면 예외."""
+    resp = requests.get(
+        API_URL.replace("per_page=20", "per_page=100"),
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "subtitle-download-site"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return [
+        {"버전": data.get("tag_name", ""), "파일": a["name"], "받은 횟수": a.get("download_count", 0)}
+        for data in resp.json()
+        for a in data.get("assets", [])
+    ]
+
+
+def admin_password():
+    """Streamlit 관리 화면(Settings → Secrets)에 등록한 ADMIN_PASSWORD. 없으면 빈 문자열."""
+    try:
+        return str(st.secrets.get("ADMIN_PASSWORD", ""))
+    except Exception:  # secrets 자체가 없을 때
+        return ""
+
+
+def show_download_counts():
+    """비밀번호를 아는 사람(사이트 주인)만 받은 횟수를 본다. 비밀번호를 등록하지 않았으면 칸 자체를 숨김."""
+    password = admin_password()
+    if not password:
+        return
+    with st.expander("🔒 관리자"):
+        if not st.session_state.get("admin_ok"):
+            typed = st.text_input("비밀번호", type="password", key="admin_pw")
+            if typed:
+                if hmac.compare_digest(typed.encode(), password.encode()):
+                    st.session_state["admin_ok"] = True
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 맞지 않습니다.")
+            return
+        try:
+            rows = fetch_download_counts()
+        except Exception:
+            st.error("받은 횟수를 불러오지 못했습니다. 잠시 뒤 다시 열어 주세요.")
+            return
+        programs = sum(r["받은 횟수"] for r in rows if _is_program(r["파일"]))
+        total = sum(r["받은 횟수"] for r in rows)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("전체", f"{total}번")
+        c2.metric("프로그램", f"{programs}번")
+        c3.metric("사용법 등", f"{total - programs}번")
+        st.dataframe(rows, hide_index=True, width="stretch")
+        st.caption("받은 사람 수가 아니라 받은 횟수입니다. 본인이 받은 것, GitHub 페이지에서 직접 받은 것도 포함됩니다. 5분마다 새로 읽습니다.")
 
 
 def file_list_html(files):
@@ -226,3 +281,5 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+show_download_counts()
